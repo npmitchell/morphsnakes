@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import copy
 
 """
 ====================
@@ -50,7 +51,6 @@ References
 """
 __author__ = "P. Márquez Neila <p.mneila@upm.es>"
 
-
 from itertools import cycle
 
 import numpy as np
@@ -61,8 +61,7 @@ __all__ = ['morphological_chan_vese',
            'inverse_gaussian_gradient',
            'circle_level_set',
            'checkerboard_level_set'
-          ]
-
+           ]
 
 __version__ = (2, 0, 1)
 __version_str__ = ".".join(map(str, __version__))
@@ -133,7 +132,7 @@ def inf_sup(u):
     return np.array(dilations, dtype=np.int8).min(0)
 
 
-_curvop = _fcycle([lambda u: sup_inf(inf_sup(u)),   # SIoIS
+_curvop = _fcycle([lambda u: sup_inf(inf_sup(u)),  # SIoIS
                    lambda u: inf_sup(sup_inf(u))])  # ISoSI
 
 
@@ -197,7 +196,7 @@ def circle_level_set(image_shape, center=None, radius=None):
 
     grid = np.mgrid[[slice(i) for i in image_shape]]
     grid = (grid.T - center).T
-    phi = radius - np.sqrt(np.sum((grid)**2, 0))
+    phi = radius - np.sqrt(np.sum((grid) ** 2, 0))
     res = np.int8(phi > 0)
     return res
 
@@ -263,8 +262,8 @@ def inverse_gaussian_gradient(image, alpha=100.0, sigma=5.0):
 
 
 def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
-                            smoothing=1, lambda1=1, lambda2=1,
-                            iter_callback=lambda x: None):
+                            smoothing=1, lambda1=1, lambda2=1, nu=None, post_smoothing=0,
+                            post_nu=None, iter_callback=lambda x: None, exit_thres=None):
     """Morphological Active Contours without Edges (MorphACWE)
 
     Active contours without edges implemented with morphological operators. It
@@ -298,10 +297,23 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         Weight parameter for the inner region. If `lambda2` is larger than
         `lambda1`, the inner region will contain a larger range of values than
         the outer region.
+    post_smoothing : int, optional
+        Number of iterations for smoothing after exiting iterative procedure
+    nu : int, optional
+        If not None and nonzero, applies pressure to the surface. If negative,
+        applies negative pressure at each iteration. int(nu) is the number of
+        times to apply a dilation or erosion at each timestep
+    post_nu : int, optional
+        If not None and nonzero, applies a dilation or erosion post_nu times to
+        the resulting level set.
     iter_callback : function, optional
         If given, this function is called once per iteration with the current
         level set as the only argument. This is useful for debugging or for
         plotting intermediate results during the evolution.
+    exit_thres : float or None
+        If given, we truncate the algorithm before #iterations = iterations if
+        the segmentation u differs by less than the given threshold, expressed
+        as a fraction of the total volume.
 
     Returns
     -------
@@ -342,17 +354,36 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
 
     iter_callback(u)
 
-    for _ in range(iterations):
+    done = False
+    kk = 0
+    while not done:
+        if kk == iterations - 1:
+            done = True
+
+        # First apply pressure
+        if nu is not None:
+            if nu > 0:
+                for _ in range(int(nu)):
+                    u = ndi.binary_dilation(u)
+            elif nu < 0:
+                for _ in range(int(-nu)):
+                    u = ndi.binary_erosion(u)
 
         # inside = u > 0
         # outside = u <= 0
+        # Weight the image with the total amount of intensity outside u
+        # numerator: Integral[ image * (1 - u) ] dV = 0 if image is BW and u perfectly segments, but > 0 if image has
+        # nonzero values outside object or if u segments less than the object.
+        # denominator: total volume outside u
         c0 = (image * (1 - u)).sum() / float((1 - u).sum() + 1e-8)
+        # Weight the image with the total amount of intensity inside u
+        # numerator: Integral[ image * u ] dV = Volume of segmented u if u segments BW image.
         c1 = (image * u).sum() / float(u.sum() + 1e-8)
 
         # Image attachment
         du = np.gradient(u)
         abs_du = np.abs(du).sum(0)
-        aux = abs_du * (lambda1 * (image - c1)**2 - lambda2 * (image - c0)**2)
+        aux = abs_du * (lambda1 * (image - c1) ** 2 - lambda2 * (image - c0) ** 2)
 
         u[aux < 0] = 1
         u[aux > 0] = 0
@@ -362,6 +393,29 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
             u = _curvop(u)
 
         iter_callback(u)
+
+        # Check if we have converged, if a convergence threshold is given
+        if exit_thres is not None:
+            if kk > 0:
+                frac_change = np.sum(np.abs(u - u_prev).ravel()) / np.sum(u)
+                print('fractional change = ', frac_change)
+                if frac_change < exit_thres:
+                    done = True
+
+            u_prev = copy.deepcopy(u)
+
+        kk += 1
+
+    if post_nu is not None:
+        if post_nu > 0:
+            for _ in range(int(post_nu)):
+                u = ndi.binary_dilation(u)
+        elif nu < 0:
+            for _ in range(int(-post_nu)):
+                u = ndi.binary_erosion(u)
+
+    for _ in range(post_smoothing):
+        u = _curvop(u)
 
     return u
 
