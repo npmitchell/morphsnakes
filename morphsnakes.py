@@ -368,6 +368,7 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
             elif nu < 0:
                 for _ in range(int(-nu)):
                     u = ndi.binary_erosion(u)
+            u = u.astype(int)
 
         # inside = u > 0
         # outside = u <= 0
