@@ -285,6 +285,11 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         `image`. Accepted values are 'checkerboard' and 'circle'. See the
         documentation of `checkerboard_level_set` and `circle_level_set`
         respectively for details about how these level sets are created.
+    nu : float, optional
+        If not None and nonzero, applies pressure to the surface. If negative,
+        applies negative pressure at each iteration or every 1/nu iterations
+        if |nu|<1. In other words, nu is the number of times to apply a
+        dilation or erosion at each timestep.
     smoothing : uint, optional
         Number of times the smoothing operator is applied per iteration.
         Reasonable values are around 1-4. Larger values lead to smoother
@@ -299,10 +304,6 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         the outer region.
     post_smoothing : int, optional
         Number of iterations for smoothing after exiting iterative procedure
-    nu : int, optional
-        If not None and nonzero, applies pressure to the surface. If negative,
-        applies negative pressure at each iteration. int(nu) is the number of
-        times to apply a dilation or erosion at each timestep
     post_nu : int, optional
         If not None and nonzero, applies a dilation or erosion post_nu times to
         the resulting level set.
@@ -353,22 +354,33 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
     u = np.int8(init_level_set > 0)
 
     iter_callback(u)
-
-    done = False
     kk = 0
+    done = False
     while not done:
-        if kk == iterations - 1:
-            done = True
-
         # First apply pressure
         if nu is not None:
             if nu > 0:
-                for _ in range(int(nu)):
-                    u = ndi.binary_dilation(u)
+                # If nu is an integer 1 or higher, apply it each time, otherwise if less than 1 apply it every so often
+                if nu % 1 == 0 or nu > 1:
+                    for _ in range(int(nu)):
+                        u = ndi.binary_dilation(u)
+
+                    u = u.astype(int)
+                else:
+                    if nu * kk % 1 < nu:
+                        u = ndi.binary_dilation(u)
+                        u = u.astype(int)
             elif nu < 0:
-                for _ in range(int(-nu)):
-                    u = ndi.binary_erosion(u)
-            u = u.astype(int)
+                # If nu is an integer -1 or lower, apply it each time
+                if nu % 1 == 0 or nu < -1:
+                    for _ in range(int(-nu)):
+                        u = ndi.binary_erosion(u)
+
+                    u = u.astype(int)
+                else:
+                    if -nu * kk % 1 < -nu:
+                        u = ndi.binary_erosion(u)
+                        u = u.astype(int)
 
         # inside = u > 0
         # outside = u <= 0
@@ -398,14 +410,17 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         # Check if we have converged, if a convergence threshold is given
         if exit_thres is not None:
             if kk > 0:
-                frac_change = np.sum(np.abs(u - u_prev).ravel()) / np.sum(u)
+                frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
                 print('fractional change = ', frac_change)
                 if frac_change < exit_thres:
                     done = True
 
             u_prev = copy.deepcopy(u)
 
+        # Update iteration number and possibly exit if done with #iterations
         kk += 1
+        if kk == iterations:
+            done = True
 
     if post_nu is not None:
         if post_nu > 0:
