@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import print_function
 import copy
 
 """
@@ -133,6 +134,11 @@ def inf_sup(u):
 
 
 _curvop = _fcycle([lambda u: sup_inf(inf_sup(u)),  # SIoIS
+                   lambda u: inf_sup(sup_inf(u))])  # ISoSI
+
+
+def curvop():
+    return _fcycle([lambda u: sup_inf(inf_sup(u)),  # SIoIS
                    lambda u: inf_sup(sup_inf(u))])  # ISoSI
 
 
@@ -356,6 +362,7 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
     iter_callback(u)
     kk = 0
     done = False
+    u_prev = copy.deepcopy(u)
     while not done:
         # First apply pressure
         if nu is not None:
@@ -402,18 +409,31 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         u[aux > 0] = 0
 
         # Smoothing
-        for _ in range(smoothing):
-            u = _curvop(u)
+        # If smoothing is an integer 1 or higher, apply it each time, otherwise if less than 1 apply it every so often
+        if smoothing % 1 == 0 or smoothing > 1:
+            for _ in range(int(smoothing)):
+                u = _curvop(u)
+        else:
+            if smoothing * kk % 1 < smoothing:
+                u = _curvop(u)
 
-        iter_callback(u)
+        # Run the callback
+        iter_callback(u, u_prev)
 
         # Check if we have converged, if a convergence threshold is given
         if exit_thres is not None:
+            frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
+            if frac_change < exit_thres:
+                done = True
+            u_prev2 = copy.deepcopy(u_prev)
+
+            # Also compare against the time point before the last in case of flip flopping
             if kk > 0:
-                frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
-                print('fractional change = ', frac_change)
-                if frac_change < exit_thres:
+                frac_change2 = float(np.sum(np.abs(u - u_prev2).ravel())) / float(np.sum(u))
+                if frac_change2 < exit_thres:
                     done = True
+                msg = '{0:3d}'.format(kk) + ': fractional change = {0:0.9f}'.format(min(frac_change, frac_change2))
+                print(msg, end='\r')
 
             u_prev = copy.deepcopy(u)
 
@@ -421,6 +441,9 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
         kk += 1
         if kk == iterations:
             done = True
+
+    # Output semifinal file/image of the evolution
+    iter_callback(u, u_prev, force=True)
 
     if post_nu is not None:
         if post_nu > 0:
@@ -432,6 +455,9 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
 
     for _ in range(post_smoothing):
         u = _curvop(u)
+
+    # Output final file/image of the evolution
+    iter_callback(u, u_prev, force=True)
 
     return u
 
@@ -559,5 +585,29 @@ def morphological_geodesic_active_contour(gimage, iterations,
             u = _curvop(u)
 
         iter_callback(u)
+
+    return u
+
+
+def dilate_n_smooth_m(u, n=1, m=1):
+    """Dilate the implicit surface n times, then smooth m times.
+
+    Parameters
+    ----------
+    u :
+    n : int
+        number of times to dilate
+    m : int
+        number of times to smooth
+
+    Returns
+    -------
+    u
+    """
+    for _ in range(int(n)):
+        u = ndi.binary_dilation(u)
+
+    for _ in range(int(m)):
+        u = _curvop(u)
 
     return u
