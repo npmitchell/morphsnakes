@@ -171,7 +171,7 @@ def _init_level_set(init_level_set, image_shape):
 
 
 def circle_level_set(image_shape, center=None, radius=None):
-    """Create a circle level set with binary values.
+    """Create a circle or (hyper)sphere level set with binary values.
 
     Parameters
     ----------
@@ -204,6 +204,9 @@ def circle_level_set(image_shape, center=None, radius=None):
     grid = (grid.T - center).T
     phi = radius - np.sqrt(np.sum((grid) ** 2, 0))
     res = np.int8(phi > 0)
+    if np.sum(res.ravel()) == 0:
+        raise RuntimeError('The initial level set has no intersection with the data volume')
+    
     return res
 
 
@@ -422,9 +425,14 @@ def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
 
         # Check if we have converged, if a convergence threshold is given
         if exit_thres is not None:
-            frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
-            if frac_change < exit_thres:
+            if np.sum(u) > 0:
+                frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
+                if frac_change < exit_thres:
+                    done = True
+            else:
                 done = True
+                print('WARNING: level set has shrunk to zero size!')
+
             u_prev2 = copy.deepcopy(u_prev)
 
             # Also compare against the time point before the last in case of flip flopping
