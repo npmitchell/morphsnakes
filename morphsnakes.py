@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 import copy
+import scipy.ndimage.measurements
+import skimage.measure
 
 """
 ====================
@@ -58,6 +60,7 @@ import numpy as np
 from scipy import ndimage as ndi
 
 __all__ = ['morphological_chan_vese',
+           'volumetric_morphological_chan_vese',
            'morphological_geodesic_active_contour',
            'inverse_gaussian_gradient',
            'circle_level_set',
@@ -268,6 +271,230 @@ def inverse_gaussian_gradient(image, alpha=100.0, sigma=5.0):
     """
     gradnorm = ndi.gaussian_gradient_magnitude(image, sigma, mode='nearest')
     return 1.0 / np.sqrt(1.0 + alpha * gradnorm)
+
+
+def getLargestCCSize(segmentation):
+    """Get the size of the largest connected component that is nonzero"""
+    labels = skimage.measure.label(segmentation)
+    unique, counts = np.unique(labels, return_counts=True)
+    return np.max(counts[1:])
+
+
+def volumetric_morphological_chan_vese(image, iterations, init_level_set='checkerboard',
+                            smoothing=1, lambda1=1, lambda2=1, nu=None, post_smoothing=0,
+                            post_nu=None, iter_callback=lambda x: None, exit_thres=None, volume0=1, nu_max=5):
+    """Morphological Active Contours without Edges (MorphACWE)
+
+    Active contours without edges implemented with morphological operators. It
+    can be used to segment objects in images and volumes without well defined
+    borders. It is required that the inside of the object looks different on
+    average than the outside (i.e., the inner area of the object should be
+    darker or lighter than the outer area on average).
+
+    Parameters
+    ----------
+    image : (M, N) or (L, M, N) array
+        Grayscale image or volume to be segmented.
+    iterations : uint
+        Number of iterations to run
+    init_level_set : str, (M, N) array, or (L, M, N) array
+        Initial level set. If an array is given, it will be binarized and used
+        as the initial level set. If a string is given, it defines the method
+        to generate a reasonable initial level set with the shape of the
+        `image`. Accepted values are 'checkerboard' and 'circle'. See the
+        documentation of `checkerboard_level_set` and `circle_level_set`
+        respectively for details about how these level sets are created.
+    nu : float >= 0, optional
+        If not None and nonzero, applies pressure to the surface. Unlike in
+        the canonical morphsnakes opration, here this is a prefactor to the
+        amount of dilation or erosion to apply, with the sign (dilation/erosion)
+        depending on the volume difference from its target, volume0.
+        Still, though, nu is the number of times to apply a dilation or erosion
+         at each timestep given that the volume is too big or too small
+    smoothing : uint, optional
+        Number of times the smoothing operator is applied per iteration.
+        Reasonable values are around 1-4. Larger values lead to smoother
+        segmentations.
+    lambda1 : float, optional
+        Weight parameter for the outer region. If `lambda1` is larger than
+        `lambda2`, the outer region will contain a larger range of values than
+        the inner region.
+    lambda2 : float, optional
+        Weight parameter for the inner region. If `lambda2` is larger than
+        `lambda1`, the inner region will contain a larger range of values than
+        the outer region.
+    post_smoothing : int, optional
+        Number of iterations for smoothing after exiting iterative procedure
+    post_nu : int, optional
+        If not None and nonzero, applies a dilation or erosion post_nu times to
+        the resulting level set.
+    iter_callback : function, optional
+        If given, this function is called once per iteration with the current
+        level set as the only argument. This is useful for debugging or for
+        plotting intermediate results during the evolution.
+    exit_thres : float or None
+        If given, we truncate the algorithm before #iterations = iterations if
+        the segmentation u differs by less than the given threshold, expressed
+        as a fraction of the total volume.
+
+    Returns
+    -------
+    out : (M, N) or (L, M, N) array
+        Final segmentation (i.e., the final level set)
+
+    See also
+    --------
+    circle_level_set, checkerboard_level_set
+
+    Notes
+    -----
+
+    This is a version of the Chan-Vese algorithm that uses morphological
+    operators instead of solving a partial differential equation (PDE) for the
+    evolution of the contour. The set of morphological operators used in this
+    algorithm are proved to be infinitesimally equivalent to the Chan-Vese PDE
+    (see [1]_). However, morphological operators are do not suffer from the
+    numerical stability issues typically found in PDEs (it is not necessary to
+    find the right time step for the evolution), and are computationally
+    faster.
+
+    This is an adaptation of the algorithm described in [1]_.
+
+    References
+    ----------
+    .. [1] A Morphological Approach to Curvature-based Evolution of Curves and
+           Surfaces, Pablo Márquez-Neila, Luis Baumela, Luis Álvarez. In IEEE
+           Transactions on Pattern Analysis and Machine Intelligence (PAMI),
+           2014, DOI 10.1109/TPAMI.2013.106
+    """
+
+    init_level_set = _init_level_set(init_level_set, image.shape)
+
+    _check_input(image, init_level_set)
+
+    u = np.int8(init_level_set > 0)
+
+    iter_callback(u)
+    kk = 0
+    done = False
+    u_prev = copy.deepcopy(u)
+    while not done:
+        # First apply pressure if volume is different from target
+        volume_cc = getLargestCCSize(u)
+        print('volume_cc = '+str(volume_cc))
+
+        if np.abs(volume_cc - volume0) > 0:
+            # Is volume too big or too small? By how much
+            nu_kk = nu * float(volume0 - volume_cc) / float(volume0)
+            print('volumetric pressure --> '+str(nu_kk)+' v0='+str(volume0)+' vcc='+str(volume_cc)+' nu='+str(nu))
+            if nu_kk > 0:
+                # If nu_kk >= 1, apply dilation each time that volume is too small (nu_kk > 0)
+                # otherwise if less than 1 apply it every so often
+                if nu_kk >= 1:
+                    num_iter = min(int(nu_kk), nu_max)
+                    print('dilating ', num_iter, ' times')
+                    for _ in range(num_iter):
+                        u = ndi.binary_dilation(u)
+
+                    u = u.astype(int)
+                else:
+                    # We apply a fractional dilation, only every so often in iterations
+                    if nu_kk * kk % 1 < nu_kk:
+                        print('dilating...')
+                        u = ndi.binary_dilation(u)
+                        u = u.astype(int)
+            elif nu_kk < 0:
+                print('eroding...')
+                # If nu_kk <= -1, apply erosion each time that volume is too big
+                if nu_kk <= -1:
+                    num_iter = min(int(-nu_kk), nu_max)
+                    print('nerosion = ', num_iter)
+                    for _ in range(num_iter):
+                        u = ndi.binary_erosion(u)
+
+                    u = u.astype(int)
+                else:
+                    # We apply a fractional erosion, only every so often in iterations
+                    if -nu_kk * kk % 1 < np.abs(nu_kk):
+                        u = ndi.binary_erosion(u)
+                        u = u.astype(int)
+
+        # inside = u > 0
+        # outside = u <= 0
+        # Weight the image with the total amount of intensity outside u
+        # numerator: Integral[ image * (1 - u) ] dV = 0 if image is BW and u perfectly segments, but > 0 if image has
+        # nonzero values outside object or if u segments less than the object.
+        # denominator: total volume outside u
+        c0 = (image * (1 - u)).sum() / float((1 - u).sum() + 1e-8)
+        # Weight the image with the total amount of intensity inside u
+        # numerator: Integral[ image * u ] dV = Volume of segmented u if u segments BW image.
+        c1 = (image * u).sum() / float(u.sum() + 1e-8)
+
+        # Image attachment
+        du = np.gradient(u)
+        abs_du = np.abs(du).sum(0)
+        aux = abs_du * (lambda1 * (image - c1) ** 2 - lambda2 * (image - c0) ** 2)
+
+        u[aux < 0] = 1
+        u[aux > 0] = 0
+
+        # Smoothing
+        # If smoothing is an integer 1 or higher, apply it each time, otherwise if less than 1 apply it every so often
+        if smoothing % 1 == 0 or smoothing > 1:
+            for _ in range(int(smoothing)):
+                u = _curvop(u)
+        else:
+            if smoothing * kk % 1 < smoothing:
+                u = _curvop(u)
+
+        # Run the callback
+        iter_callback(u, u_prev)
+
+        # Check if we have converged, if a convergence threshold is given
+        if exit_thres is not None:
+            if np.sum(u) > 0:
+                frac_change = float(np.sum(np.abs(u - u_prev).ravel())) / float(np.sum(u))
+                if frac_change < exit_thres:
+                    done = True
+            else:
+                done = True
+                print('WARNING: level set has shrunk to zero size!')
+
+            u_prev2 = copy.deepcopy(u_prev)
+
+            # Also compare against the time point before the last in case of flip flopping
+            if kk > 0:
+                frac_change2 = float(np.sum(np.abs(u - u_prev2).ravel())) / float(np.sum(u))
+                if frac_change2 < exit_thres:
+                    done = True
+                msg = '{0:3d}'.format(kk) + ': fractional change = {0:0.9f}'.format(min(frac_change, frac_change2))
+                print(msg, end='\r')
+
+            u_prev = copy.deepcopy(u)
+
+        # Update iteration number and possibly exit if done with #iterations
+        kk += 1
+        if kk == iterations:
+            done = True
+
+    # Output semifinal file/image of the evolution
+    iter_callback(u, u_prev, force=True)
+
+    if post_nu is not None:
+        if post_nu > 0:
+            for _ in range(int(post_nu)):
+                u = ndi.binary_dilation(u)
+        elif post_nu < 0:
+            for _ in range(int(-post_nu)):
+                u = ndi.binary_erosion(u)
+
+    for _ in range(post_smoothing):
+        u = _curvop(u)
+
+    # Output final file/image of the evolution
+    iter_callback(u, u_prev, force=True)
+
+    return u
 
 
 def morphological_chan_vese(image, iterations, init_level_set='checkerboard',
