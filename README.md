@@ -6,6 +6,8 @@
 [![Code Health](https://landscape.io/github/Borda/morph-snakes/master/landscape.svg?style=flat)](https://landscape.io/github/Borda/morph-snakes/master) -->
 
 This code was cloned from https://github.com/pmneila/morphsnakes and is lightly edited for specific use by Noah P Mitchell.
+Credit for the vast majority of the code in this repo goes to pmneila. My version is tailored for pairing with a wrapper repository called morphsnakes_wrapper
+
 
 **morphsnakes** is an implementation of the *Morphological Snakes* for image segmentation.
 **morphsnakes** supports 2D images and 3D volumes.
